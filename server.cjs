@@ -14,10 +14,10 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.THESPORTSDB_KEY || "3";
 const BASE_URL = "https://www.thesportsdb.com/api/v1/json";
 
-// Time offset: Sweden winter time = -60 min (API is in summer time)
+// Time offset: Sweden winter time = -60 min (API looks like summer time)
 const TIME_OFFSET_MINUTES = -60;
 
-// How long a match lasts before it becomes "finished"
+// Approximate match duration before we consider it "finished"
 const MATCH_DURATION_MINUTES = 120;
 
 app.use(cors());
@@ -26,7 +26,7 @@ app.use(express.static(path.join(__dirname, "public")));
 console.log("Using TheSportsDB key:", API_KEY);
 
 // ---------------------------
-// PRIORITY STORAGE
+// PRIORITY + TAG STORAGE
 // ---------------------------
 const prioritiesPath = path.join(__dirname, "priorities.json");
 
@@ -34,9 +34,12 @@ function loadPriorities() {
   try {
     const raw = fs.readFileSync(prioritiesPath, "utf8");
     const parsed = JSON.parse(raw);
-    return { eventIds: parsed.eventIds || [] };
+    return {
+      eventIds: parsed.eventIds || [],
+      tags: parsed.tags || {} // { [eventId]: ["BB1","BB3"] }
+    };
   } catch (e) {
-    return { eventIds: [] };
+    return { eventIds: [], tags: {} };
   }
 }
 
@@ -104,6 +107,7 @@ function getPreviousSeason(league, season) {
   if (league.seasonType === "single") return String(Number(season) - 1);
 
   const m = season.match(/(\d{4})-(\d{4})/);
+  if (!m) return season;
   return `${Number(m[1]) - 1}-${Number(m[2]) - 1}`;
 }
 
@@ -114,12 +118,16 @@ function addDaysISO(date, days) {
 }
 
 // ---------------------------
-// TIME OFFSET FIXER (fixes summer/winter time)
+// TIME OFFSET FIX (summer/winter)
 // ---------------------------
 function applyTimeOffset(dateStr, rawTime) {
   if (!rawTime) return { date: dateStr, time: "" };
 
   const [hStr, mStr] = rawTime.split(":");
+  if (hStr == null || mStr == null) {
+    return { date: dateStr, time: rawTime };
+  }
+
   let minutesTotal = parseInt(hStr, 10) * 60 + parseInt(mStr, 10);
   minutesTotal += TIME_OFFSET_MINUTES;
 
@@ -180,8 +188,8 @@ app.get("/schedule", async (req, res) => {
       const league = ALLOWED_LEAGUES[idx];
 
       events.forEach(ev => {
-        const rawDate = ev.dateEvent;
-        const rawTime = ev.strTime ? ev.strTime.slice(0,5) : "";
+        const rawDate = ev.dateEvent || ev.dateEventLocal;
+        const rawTime = ev.strTime ? ev.strTime.slice(0,5) : (ev.strTimeLocal ? ev.strTimeLocal.slice(0,5) : "");
 
         if (!rawDate) return;
 
@@ -194,12 +202,14 @@ app.get("/schedule", async (req, res) => {
 
         const endDT = new Date(startDT.getTime() + MATCH_DURATION_MINUTES * 60000);
 
-        if (endDT < now) return; // match finished → hide
+        // Hide match if it's already finished
+        if (endDT < now) return;
 
         if (!dayMap.has(adjDate)) dayMap.set(adjDate, { date: adjDate, matches: [] });
 
         const id = String(ev.idEvent || "");
         const isPriority = PRIORITIES.eventIds.includes(id);
+        const tagsForId = Array.isArray(PRIORITIES.tags[id]) ? PRIORITIES.tags[id] : [];
 
         dayMap.get(adjDate).matches.push({
           id,
@@ -207,8 +217,9 @@ app.get("/schedule", async (req, res) => {
           competition: league.name,
           home: ev.strHomeTeam || "",
           away: ev.strAwayTeam || "",
-          channel: mapChannel(league.name, ev.strHomeTeam + ev.strAwayTeam),
-          priority: isPriority
+          channel: mapChannel(league.name, (ev.strHomeTeam || "") + (ev.strAwayTeam || "")),
+          priority: isPriority,
+          tags: tagsForId
         });
       });
     });
@@ -218,7 +229,7 @@ app.get("/schedule", async (req, res) => {
       a.date.localeCompare(b.date)
     );
 
-    // SORT MATCHES BY TIME
+    // Sort matches by time within each day
     allDays.forEach(day => {
       day.matches.sort((a, b) => {
         if (!a.time && !b.time) return 0;
@@ -228,7 +239,11 @@ app.get("/schedule", async (req, res) => {
       });
     });
 
-    // 14-day window
+    if (!allDays.length) {
+      return res.json({ generatedAt: new Date().toISOString(), days: [] });
+    }
+
+    // 14-day date window
     const today = new Date().toISOString().slice(0, 10);
     const end = addDaysISO(today, 13);
 
@@ -242,7 +257,7 @@ app.get("/schedule", async (req, res) => {
     res.json({ generatedAt: new Date().toISOString(), days: windowDays });
   } catch (e) {
     console.error("schedule error", e);
-    res.json({ error: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -260,6 +275,30 @@ app.post("/priorities/toggle", express.json(), (req, res) => {
   savePriorities(PRIORITIES);
 
   res.json({ ok:true, eventIds: PRIORITIES.eventIds });
+});
+
+// ---------------------------
+// TAG API (BB1–BB4)
+// ---------------------------
+app.post("/tags/toggle", express.json(), (req, res) => {
+  const id = String(req.body.id || "");
+  const tag = req.body.tag;
+  if (!id || !tag) return res.json({ ok:false });
+
+  if (!PRIORITIES.tags) PRIORITIES.tags = {};
+  if (!Array.isArray(PRIORITIES.tags[id])) PRIORITIES.tags[id] = [];
+
+  const list = PRIORITIES.tags[id];
+  const idx = list.indexOf(tag);
+  if (idx >= 0) {
+    list.splice(idx, 1); // remove
+  } else {
+    list.push(tag);      // add
+  }
+
+  savePriorities(PRIORITIES);
+
+  res.json({ ok:true, tagsForId: PRIORITIES.tags[id] });
 });
 
 // ---------------------------
