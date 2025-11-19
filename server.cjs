@@ -15,7 +15,7 @@ const API_KEY = process.env.THESPORTSDB_KEY || "3";
 const BASE_URL = "https://www.thesportsdb.com/api/v1/json";
 
 // Time offset: Sweden winter time = -60 min (API looks like summer time)
-const TIME_OFFSET_MINUTES = -60;
+const TIME_OFFSET_MINUTES = 60;
 
 // Approximate match duration before we consider it "finished"
 const MATCH_DURATION_MINUTES = 120;
